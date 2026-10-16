@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Бобр за рулём</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --ink:#2b1d14;
+    --cream:#fff4dc;
+    --amber:#f2a541;
+    --river:#2f7f86;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;overflow:hidden;background:#1d2b2e;font-family:"Trebuchet MS","Segoe UI",system-ui,sans-serif;color:var(--cream);touch-action:none;user-select:none}
+  canvas{display:block;width:100vw;height:100vh}
+  .hud{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;padding:12px 16px;pointer-events:none;font-weight:700;font-size:20px;text-shadow:0 2px 0 rgba(43,29,20,.5)}
+  .hud small{display:block;font-size:12px;font-weight:600;opacity:.85}
+  .coin-dot{display:inline-block;width:16px;height:16px;border-radius:50%;background:var(--amber);border:3px solid #b5701a;vertical-align:-2px;margin-right:6px}
+  .panel{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(29,43,46,.55)}
+  .panel.hidden{display:none}
+  .card{background:var(--cream);color:var(--ink);border-radius:22px;padding:26px 24px;max-width:340px;width:100%;text-align:center;box-shadow:0 10px 0 #b5701a,0 18px 40px rgba(0,0,0,.35)}
+  .card h1{margin:0 0 6px;font-size:30px;line-height:1.1}
+  .card p{margin:0 0 16px;font-size:16px;line-height:1.4}
+  .stats{display:flex;gap:10px;justify-content:center;margin-bottom:16px}
+  .stats div{background:#f3dfb4;border-radius:12px;padding:8px 14px;font-weight:700;font-size:18px}
+  .stats small{display:block;font-size:12px;font-weight:600;opacity:.7}
+  button{font:inherit;font-weight:800;font-size:20px;color:var(--ink);background:var(--amber);border:0;border-radius:14px;padding:14px 28px;box-shadow:0 5px 0 #b5701a;cursor:pointer;width:100%}
+  button:active{transform:translateY(4px);box-shadow:0 1px 0 #b5701a}
+  button:focus-visible{outline:3px solid var(--river);outline-offset:3px}
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Игра: бобр едет на машине"></canvas>
+
+<div class="hud" id="hud">
+  <div><span id="dist">0</span> м<small>Рекорд: <span id="best">0</span> м</small></div>
+  <div style="text-align:right"><span class="coin-dot"></span><span id="coins">0</span><small>Бобр койны</small></div>
+</div>
+
+<div class="panel" id="start">
+  <div class="card">
+    <h1>Бобр за рулём</h1>
+    <p>Нажми на экран или пробел, чтобы прыгнуть. Объезжай брёвна и камни, собирай Бобр койны.</p>
+    <button id="go">Поехали</button>
+  </div>
+</div>
+
+<div class="panel hidden" id="over">
+  <div class="card">
+    <h1>Врезались!</h1>
+    <div class="stats">
+      <div><span id="rDist">0</span> м<small>Дистанция</small></div>
+      <div><span id="rCoins">0</span><small>Койны</small></div>
+    </div>
+    <p id="rMsg"></p>
+    <button id="again">Ещё раз</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  const $ = id => document.getElementById(id);
+
+  const H = 420;                // логическая высота мира
+  let W = 800, S = 1;           // логическая ширина и масштаб
+  let GY = H - 90;              // уровень земли
+
+  function resize(){
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    S = window.innerHeight / H;
+    W = window.innerWidth / S;
+    cv.width = window.innerWidth * dpr;
+    cv.height = window.innerHeight * dpr;
+    ctx.setTransform(S * dpr, 0, 0, S * dpr, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- Telegram и сохранение ----------
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const initData = tg ? tg.initData : '';
+  if (tg){
+    tg.ready(); tg.expand();
+    try { tg.disableVerticalSwipes(); } catch(e){}
+    try { tg.setHeaderColor('#1d2b2e'); tg.setBackgroundColor('#1d2b2e'); } catch(e){}
+  }
+
+  let best = 0, bank = 0, runId = null;
+  const useServer = !!initData;   // внутри Telegram всё хранится на сервере
+  if (!useServer){
+    try { best = +localStorage.getItem('bobrBest') || 0; bank = +localStorage.getItem('bobrBank') || 0; } catch(e){}
+  }
+
+  async function api(path, body){
+    try {
+      const r = await fetch(path, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ ...(body || {}), initData })
+      });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch(e){ return null; }
+  }
+
+  function showStats(){
+    $('best').textContent = best;
+    $('coins').textContent = bank;
+  }
+  showStats();
+
+  if (useServer){
+    api('/api/me').then(r => {
+      if (r){ bank = r.coins; best = r.best; showStats(); }
+    });
+  }
+
+  // ---------- состояние ----------
+  let state = 'ready';  // ready | play | over
+  let speed, dist, coins, obstacles, pickups, t, nextObs, holding;
+  const car = { x: 110, y: 0, vy: 0, w: 96, h: 34, onGround: true, wheel: 0 };
+  const GRAV = 2300, JUMP = -820;
+
+  function reset(){
+    speed = 330; dist = 0; coins = 0; t = 0; holding = false;
+    obstacles = []; pickups = [];
+    nextObs = 700;
+    car.x = Math.max(80, Math.min(140, W * 0.2));
+    car.y = GY - car.h; car.vy = 0; car.onGround = true;
+    $('coins').textContent = bank; $('dist').textContent = 0;
+  }
+  reset();
+
+  // ---------- управление ----------
+  function jump(){
+    if (state === 'ready') return;
+    if (state === 'play' && car.onGround){
+      car.vy = JUMP; car.onGround = false;
+    }
+    holding = true;
+  }
+  function release(){
+    holding = false;
+    if (car.vy < -300) car.vy *= 0.55;  // короткое нажатие = низкий прыжок
+  }
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp'){ e.preventDefault(); if(!e.repeat) jump(); }
+  });
+  window.addEventListener('keyup', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp') release();
+  });
+  cv.addEventListener('pointerdown', e => { e.preventDefault(); jump(); });
+  window.addEventListener('pointerup', release);
+
+  function start(){
+    reset();
+    runId = null;
+    if (useServer) api('/api/start').then(r => { if (r) runId = r.run_id; });
+    state = 'play';
+    $('start').classList.add('hidden');
+    $('over').classList.add('hidden');
+  }
+  $('go').addEventListener('click', start);
+  $('again').addEventListener('click', start);
+
+  // ---------- появление препятствий ----------
+  const TYPES = [
+    { name:'log',   w:70, h:26 },
+    { name:'rock',  w:44, h:36 },
+    { name:'stump', w:40, h:56 },
+    { name:'logs',  w:90, h:48 },   // стопка брёвен, нужен высокий прыжок
+  ];
+  function spawn(){
+    const type = TYPES[Math.floor(Math.random() * (dist > 300 ? 4 : 3))];
+    const o = { x: W + 40, w: type.w, h: type.h, name: type.name };
+    obstacles.push(o);
+    // монеты дугой над препятствием
+    if (Math.random() < 0.8){
+      const n = 5;
+      const span = o.w + 120;
+      for (let i = 0; i < n; i++){
+        const k = i / (n - 1);
+        pickups.push({
+          x: o.x - 60 + k * span,
+          y: GY - 40 - Math.sin(k * Math.PI) * (o.h + 70),
+          r: 11, got: false
+        });
+      }
+    }
+    // расстояние до следующего: минимум, чтобы успеть приземлиться
+    const air = 2 * (-JUMP / GRAV) * speed;
+    nextObs = air * 0.9 + 140 + Math.random() * 380;
+  }
+
+  // ---------- обновление ----------
+  function hit(a, b){
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function update(dt){
+    t += dt;
+    if (state !== 'play') { car.wheel += dt * 6; return; }
+
+    speed += dt * 6;                 // постепенно быстрее
+    dist += speed * dt / 40;
+    nextObs -= speed * dt;
+    if (nextObs <= 0) spawn();
+
+    // физика прыжка
+    const g = (holding && car.vy < 0) ? GRAV * 0.7 : GRAV;
+    car.vy += g * dt;
+    car.y += car.vy * dt;
+    if (car.y >= GY - car.h){ car.y = GY - car.h; car.vy = 0; car.onGround = true; }
+    car.wheel += speed * dt / 14;
+
+    // движение объектов
+    for (const o of obstacles) o.x -= speed * dt;
+    for (const p of pickups) p.x -= speed * dt;
+    obstacles = obstacles.filter(o => o.x + o.w > -20);
+    pickups = pickups.filter(p => p.x > -30 && !p.got);
+
+    // столкновения (хитбокс чуть меньше картинки)
+    const box = { x: car.x + 8, y: car.y + 8, w: car.w - 16, h: car.h - 6 };
+    for (const o of obstacles){
+      if (hit(box, { x: o.x + 4, y: GY - o.h + 4, w: o.w - 8, h: o.h - 4 })){ crash(); return; }
+    }
+    for (const p of pickups){
+      if (Math.abs(p.x - (car.x + car.w/2)) < 50 && Math.abs(p.y - (car.y - 10)) < 50){
+        p.got = true; coins++;
+        $('coins').textContent = bank + coins;
+      }
+    }
+    $('dist').textContent = Math.floor(dist);
+  }
+
+  function crash(){
+    state = 'over';
+    const d = Math.floor(dist);
+    const isBest = d > best;
+    const earned = coins;
+    $('rDist').textContent = d;
+    $('rCoins').textContent = earned;
+    $('rMsg').textContent = isBest ? 'Новый рекорд!' : 'Бобр отряхнулся и готов ехать дальше.';
+    if (useServer){
+      api('/api/finish', { run_id: runId, dist: d, coins: earned }).then(r => {
+        if (r){
+          bank = r.coins; best = r.best; showStats();
+          $('rMsg').textContent = (isBest ? 'Новый рекорд! ' : '') + 'Всего Бобр койнов: ' + bank;
+        } else {
+          $('rMsg').textContent = 'Не удалось сохранить результат. Проверь интернет и сыграй ещё раз.';
+        }
+      });
+    } else {
+      bank += earned;
+      if (isBest) best = d;
+      try { localStorage.setItem('bobrBank', bank); localStorage.setItem('bobrBest', best); } catch(e){}
+      showStats();
+      $('rMsg').textContent = (isBest ? 'Новый рекорд! ' : '') + 'Всего Бобр койнов: ' + bank;
+    }
+    setTimeout(() => $('over').classList.remove('hidden'), 450);
+  }
+
+  // ---------- рисование ----------
+  const clouds = Array.from({length:5}, (_, i) => ({ x: i * 220, y: 40 + (i % 3) * 36, s: 0.8 + (i % 2) * 0.5 }));
+  const trees = Array.from({length:14}, (_, i) => ({ x: i * 130, h: 60 + (i * 37) % 50 }));
+
+  function rr(x, y, w, h, r){
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawBackground(off){
+    // небо
+    const g = ctx.createLinearGradient(0, 0, 0, GY);
+    g.addColorStop(0, '#7cc3c4'); g.addColorStop(1, '#f9dfa5');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // солнце
+    ctx.fillStyle = '#ffe9a8';
+    ctx.beginPath(); ctx.arc(W * 0.78, 90, 38, 0, 7); ctx.fill();
+    // облака
+    ctx.fillStyle = 'rgba(255,255,255,.75)';
+    for (const c of clouds){
+      const x = ((c.x - off * 0.05) % (W + 200) + W + 200) % (W + 200) - 100;
+      ctx.beginPath();
+      ctx.ellipse(x, c.y, 40 * c.s, 14 * c.s, 0, 0, 7);
+      ctx.ellipse(x + 24 * c.s, c.y - 8 * c.s, 26 * c.s, 14 * c.s, 0, 0, 7);
+      ctx.fill();
+    }
+    // дальние холмы
+    ctx.fillStyle = '#4f9a86';
+    ctx.beginPath(); ctx.moveTo(0, GY);
+    for (let x = 0; x <= W + 20; x += 20){
+      ctx.lineTo(x, GY - 50 - Math.sin((x + off * 0.1) / 90) * 22 - Math.sin((x + off * 0.1) / 37) * 6);
+    }
+    ctx.lineTo(W + 20, GY); ctx.fill();
+    // ёлки
+    for (const tr of trees){
+      const span = trees.length * 130;
+      const x = ((tr.x - off * 0.3) % span + span) % span - 60;
+      if (x > W + 40) continue;
+      ctx.fillStyle = '#2d6a4f';
+      ctx.beginPath();
+      ctx.moveTo(x, GY - tr.h - 10); ctx.lineTo(x - 26, GY); ctx.lineTo(x + 26, GY); ctx.fill();
+      ctx.fillStyle = '#5a3e2b'; ctx.fillRect(x - 3, GY - 6, 6, 8);
+    }
+  }
+
+  function drawGround(off){
+    ctx.fillStyle = '#7a5334'; ctx.fillRect(0, GY, W, H - GY);
+    ctx.fillStyle = '#5da05a'; ctx.fillRect(0, GY, W, 10);
+    ctx.fillStyle = '#654427';
+    const step = 60;
+    const shift = off % step;
+    for (let x = -shift; x < W; x += step){
+      ctx.fillRect(x + 10, GY + 28, 22, 6);
+      ctx.fillRect(x + 36, GY + 54, 14, 5);
+    }
+  }
+
+  function drawObstacle(o){
+    const x = o.x, y = GY - o.h;
+    if (o.name === 'rock'){
+      ctx.fillStyle = '#8a8f98';
+      ctx.beginPath();
+      ctx.moveTo(x, GY); ctx.lineTo(x + 6, y + 14); ctx.lineTo(x + o.w * 0.4, y);
+      ctx.lineTo(x + o.w * 0.8, y + 8); ctx.lineTo(x + o.w, GY); ctx.fill();
+      ctx.fillStyle = '#aab0b8';
+      ctx.beginPath(); ctx.moveTo(x + o.w*0.4, y); ctx.lineTo(x + o.w*0.8, y + 8); ctx.lineTo(x + o.w*0.55, y + 16); ctx.fill();
+    } else if (o.name === 'stump'){
+      ctx.fillStyle = '#6b4423'; rr(x, y, o.w, o.h, 4); ctx.fill();
+      ctx.fillStyle = '#d9a86a'; ctx.beginPath(); ctx.ellipse(x + o.w/2, y + 3, o.w/2, 7, 0, 0, 7); ctx.fill();
+      ctx.strokeStyle = '#9a6b3a'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.ellipse(x + o.w/2, y + 3, o.w/4, 3.5, 0, 0, 7); ctx.stroke();
+    } else {
+      // брёвна (одно или стопка)
+      const rows = o.name === 'logs' ? 2 : 1;
+      const lh = o.h / rows;
+      for (let r = 0; r < rows; r++){
+        const ly = GY - lh * (r + 1);
+        const lw = o.w - r * 18;
+        const lx = x + r * 9;
+        ctx.fillStyle = '#7a4a24'; rr(lx, ly, lw, lh, lh / 2); ctx.fill();
+        ctx.fillStyle = '#d9a86a'; ctx.beginPath(); ctx.ellipse(lx + lh/2, ly + lh/2, lh/2 - 3, lh/2 - 3, 0, 0, 7); ctx.fill();
+        ctx.strokeStyle = '#5c3719'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(lx + lh, ly + lh * 0.35); ctx.lineTo(lx + lw - 10, ly + lh * 0.35); ctx.stroke();
+      }
+    }
+  }
+
+  function drawCoin(p){
+    const w = Math.abs(Math.cos(t * 4 + p.x * 0.02));
+    ctx.fillStyle = '#f2a541';
+    ctx.beginPath(); ctx.ellipse(p.x, p.y, p.r * (0.35 + 0.65 * w), p.r, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#b5701a'; ctx.lineWidth = 3; ctx.stroke();
+    if (w > 0.5){
+      ctx.fillStyle = '#b5701a'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('Б', p.x, p.y + 5);
+    }
+  }
+
+  function wheel(cx, cy, r, rot){
+    ctx.fillStyle = '#22211f'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.fill();
+    ctx.fillStyle = '#c9c3b6'; ctx.beginPath(); ctx.arc(cx, cy, r * 0.55, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#6b665c'; ctx.lineWidth = 2;
+    for (let i = 0; i < 4; i++){
+      const a = rot + i * Math.PI / 2;
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(a) * r * 0.55, cy + Math.sin(a) * r * 0.55); ctx.stroke();
+    }
+  }
+
+  function drawCar(){
+    const x = car.x, y = car.y;
+    const bob = car.onGround && state === 'play' ? Math.sin(t * 30) * 0.8 : 0;
+    ctx.save();
+    ctx.translate(0, bob);
+    // небольшой наклон в прыжке
+    ctx.translate(x + car.w / 2, y + car.h / 2);
+    ctx.rotate(Math.max(-0.2, Math.min(0.25, car.vy / 4500)));
+    ctx.translate(-(x + car.w / 2), -(y + car.h / 2));
+
+    // хвост-лопата (сзади, торчит из багажника)
+    ctx.fillStyle = '#4a2f1a';
+    ctx.save(); ctx.translate(x - 10, y + 6); ctx.rotate(-0.15 + Math.sin(t * 12) * 0.05);
+    ctx.beginPath(); ctx.ellipse(0, 0, 18, 8, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#2f1d0f'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(-10, -3); ctx.lineTo(8, 3); ctx.moveTo(-10, 3); ctx.lineTo(8, -3); ctx.stroke();
+    ctx.restore();
+
+    // кузов
+    ctx.fillStyle = '#e8573c'; rr(x, y + 8, car.w, car.h - 8, 9); ctx.fill();
+    ctx.fillStyle = '#c93f27'; ctx.fillRect(x + 4, y + car.h - 12, car.w - 8, 4);
+    // кабина
+    ctx.fillStyle = '#e8573c';
+    ctx.beginPath(); ctx.moveTo(x + 22, y + 10); ctx.lineTo(x + 32, y - 6); ctx.lineTo(x + 66, y - 6); ctx.lineTo(x + 78, y + 10); ctx.fill();
+    ctx.fillStyle = '#bfe6ea'; // окно
+    ctx.beginPath(); ctx.moveTo(x + 30, y + 8); ctx.lineTo(x + 37, y - 2); ctx.lineTo(x + 62, y - 2); ctx.lineTo(x + 70, y + 8); ctx.fill();
+
+    // бобр в окне
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(x + 30, y + 8); ctx.lineTo(x + 37, y - 2); ctx.lineTo(x + 62, y - 2); ctx.lineTo(x + 70, y + 8); ctx.clip();
+    const bx = x + 52, by = y + 2;
+    ctx.fillStyle = '#8a5a34'; ctx.beginPath(); ctx.arc(bx, by + 2, 13, 0, 7); ctx.fill();            // голова
+    ctx.beginPath(); ctx.arc(bx - 9, by - 8, 5, 0, 7); ctx.arc(bx + 7, by - 9, 5, 0, 7); ctx.fill();   // уши
+    ctx.fillStyle = '#d9a97a'; ctx.beginPath(); ctx.ellipse(bx + 7, by + 6, 8, 6, 0, 0, 7); ctx.fill(); // морда
+    ctx.fillStyle = '#22150b'; ctx.beginPath(); ctx.arc(bx + 12, by + 3, 2.4, 0, 7); ctx.fill();         // нос
+    ctx.fillStyle = '#fff'; ctx.fillRect(bx + 5, by + 8, 4, 6); ctx.fillRect(bx + 9.5, by + 8, 4, 6);   // зубы
+    ctx.strokeStyle = '#c9c0b0'; ctx.lineWidth = 1; ctx.strokeRect(bx + 5, by + 8, 4, 6); ctx.strokeRect(bx + 9.5, by + 8, 4, 6);
+    ctx.fillStyle = '#22150b'; ctx.beginPath(); ctx.arc(bx + 3, by - 2, 2.2, 0, 7); ctx.fill();         // глаз
+    ctx.restore();
+
+    // фара и бампер
+    ctx.fillStyle = '#ffe9a8'; ctx.beginPath(); ctx.arc(x + car.w - 5, y + 18, 4, 0, 7); ctx.fill();
+    ctx.fillStyle = '#bdb6a6'; ctx.fillRect(x + car.w - 4, y + 26, 6, 5);
+
+    // колёса
+    wheel(x + 22, y + car.h, 12, car.wheel);
+    wheel(x + car.w - 22, y + car.h, 12, car.wheel);
+    ctx.restore();
+
+    // пыль из-под колёс
+    if (car.onGround && state === 'play'){
+      ctx.fillStyle = 'rgba(122,83,52,.4)';
+      for (let i = 0; i < 3; i++){
+        const k = (t * 5 + i / 3) % 1;
+        ctx.beginPath(); ctx.arc(x + 10 - k * 36, GY - 4 - k * 14, 3 + k * 5, 0, 7); ctx.fill();
+      }
+    }
+  }
+
+  function draw(){
+    const off = dist * 40;
+    drawBackground(off);
+    drawGround(off);
+    for (const p of pickups) drawCoin(p);
+    for (const o of obstacles) drawObstacle(o);
+    drawCar();
+    if (state === 'ready'){
+      ctx.fillStyle = 'rgba(43,29,20,.0)';
+    }
+  }
+
+  // ---------- цикл ----------
+  let last = performance.now();
+  function frame(now){
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    if (state === 'ready') dist += 0.3 * dt * 60 * 0.02;   // фон медленно едет на стартовом экране
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
